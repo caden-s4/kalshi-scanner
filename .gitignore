@@ -1,0 +1,48 @@
+# --- Secrets: NEVER commit these ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+# The Kalshi RSA key is sometimes stored with a .txt name; ignore that layout too.
+**/kalshi-scanner.txt
+**/kalshi*key*.txt
+
+# --- Captured data (large; belongs on the data volume, not in git) ---
+data/
+*.ndjson
+*.ndjson.zst
+*.parquet
+
+# --- Local state / logs ---
+backfill_state.db
+*.db
+*.log
+
+# --- Python environment & caches ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# --- Throwaway analysis / dev scripts (kept locally, not part of the project) ---
+_census_rows.json
+_census_samples.json
+probe.py
+_capture.py
+_precision.py
+_bf_verify.py
+_census.py
+_inspect.py
+_pullcost.py
+_shape.py
+_verify.py
+_wifitest.sh
+
+# --- Local editor / tooling state ---
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

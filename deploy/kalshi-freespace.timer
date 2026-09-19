@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Kalshi free-space monitor every 5 minutes
+Documentation=file:/home/kalshi/kalshi-scanner/DEPLOY.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Kalshi free-space monitor
+Documentation=file:/home/kalshi/kalshi-scanner/DEPLOY.md
+RequiresMountsFor=/mnt/kalshi
+
+[Service]
+Type=oneshot
+User=kalshi
+Group=kalshi
+WorkingDirectory=/home/kalshi/kalshi-scanner
+# Warns (journal WARNING) when free space drops below the threshold. Override:
+# Environment=MIN_FREE_GB_WARN=15
+ExecStart=/home/kalshi/kalshi-scanner/.venv/bin/python /home/kalshi/kalshi-scanner/free_space_monitor.py
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kalshi-freespace
+
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes

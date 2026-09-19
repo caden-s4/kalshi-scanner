@@ -1,0 +1,50 @@
+[Unit]
+Description=Kalshi market-data recorder
+Documentation=file:/home/kalshi/kalshi-scanner/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+# Do not start until the data volume is mounted; systemd derives the mount unit
+# dependency from this path and stops the service if the mount goes away.
+RequiresMountsFor=/mnt/kalshi
+# Never give up retrying transient failures (network outages self-heal); rely on
+# the backoff below instead of the start-limit burst to avoid hot-looping. This
+# is a [Unit] directive.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=kalshi
+Group=kalshi
+WorkingDirectory=/home/kalshi/kalshi-scanner
+# run_recorder.py supervises recorder.py and maps an intentional disk-space halt
+# to exit code 75 (see RestartPreventExitStatus below).
+ExecStart=/home/kalshi/kalshi-scanner/.venv/bin/python /home/kalshi/kalshi-scanner/run_recorder.py
+
+# Restart on crash with growing backoff, but NEVER restart on an intentional
+# disk-space halt (exit 75) -- restarting into a full disk is pointless and the
+# recorder would immediately refuse to start again.
+Restart=on-failure
+RestartPreventExitStatus=75
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=300
+
+# Allow the recorder to drain its queue and flush the final zstd frame on stop.
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kalshi-recorder
+
+# Hardening (code lives under /home/kalshi, data under /mnt/kalshi).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/mnt/kalshi
+
+[Install]
+WantedBy=multi-user.target

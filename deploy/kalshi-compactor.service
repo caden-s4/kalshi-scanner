@@ -1,0 +1,34 @@
+[Unit]
+Description=Kalshi hourly compaction, then retention
+Documentation=file:/home/kalshi/kalshi-scanner/DEPLOY.md
+RequiresMountsFor=/mnt/kalshi
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=kalshi
+Group=kalshi
+WorkingDirectory=/home/kalshi/kalshi-scanner
+
+# Compact every completed hour-file (never the open one).
+ExecStart=/home/kalshi/kalshi-scanner/.venv/bin/python /home/kalshi/kalshi-scanner/compact_completed.py
+
+# Retention runs ONLY after a successful compaction: for Type=oneshot systemd
+# skips ExecStartPost entirely if ExecStart exits non-zero (e.g. a reconciliation
+# failure), so nothing is ever deleted on the back of a failed compaction.
+ExecStartPost=/home/kalshi/kalshi-scanner/.venv/bin/python /home/kalshi/kalshi-scanner/retention.py
+
+# Override the default 7-day retention age here if desired, e.g.:
+# Environment=RETENTION_MIN_AGE_DAYS=14
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kalshi-compactor
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/mnt/kalshi

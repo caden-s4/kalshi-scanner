@@ -1,0 +1,16 @@
+# Kalshi scanner — pinned direct dependencies (Python >=3.11).
+# Install:  python -m pip install -r requirements.txt
+
+# --- Runtime ---
+cryptography==50.0.1     # auth.py: RSA-PSS SHA256 request signing
+websockets==17.1         # recorder.py: WS market-data stream
+python-dotenv==1.2.3     # config.py: .env loading
+zstandard==0.25.0        # recorder.py / compactor.py: zstd NDJSON + Parquet
+pyarrow==25.0.1          # schema.py / compactor.py / reader.py: Parquet I/O
+duckdb==1.5.5            # reader.py: SQL over Parquet
+pandas==3.0.5            # reader.py: typed result frames
+httpx==0.28.1            # backfill.py: REST trade/discovery pulls
+
+# --- Dev / tooling ---
+ruff==0.16.7
+mypy==2.3.1

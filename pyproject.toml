@@ -1,0 +1,33 @@
+[project]
+name = "kalshi-scanner"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["probe.py", "_capture.py", "_inspect.py", "_precision.py", "_verify.py", "_shape.py", "_bf_verify.py", "_census.py", "_pullcost.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["config.py", "auth.py", "recorder.py", "schema.py", "compactor.py", "reader.py", "backfill.py", "migrate_trades.py", "run_recorder.py", "compact_completed.py", "retention.py", "free_space_monitor.py"]
+exclude = "(probe|_capture|_inspect|_precision|_verify|_shape|_census|_pullcost)\\.py|^tests/"
+
+[[tool.mypy.overrides]]
+module = ["zstandard.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*", "duckdb.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*", "numpy", "numpy.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+follow_imports_for_stubs = true

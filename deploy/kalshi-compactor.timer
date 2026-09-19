@@ -1,0 +1,15 @@
+[Unit]
+Description=Run Kalshi compaction + retention hourly
+Documentation=file:/home/kalshi/kalshi-scanner/DEPLOY.md
+
+[Timer]
+# Fire at 5 past every hour: the just-completed hour-file is closed by then, and
+# compact_completed.py excludes the current hour regardless, so this is a margin,
+# not a correctness dependency.
+OnCalendar=*-*-* *:05:00
+# Catch up on a run missed while the box was down.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
