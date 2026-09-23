@@ -10,10 +10,14 @@ Architecture:
   * A writer task drains the queue, applies optional prefix filtering, serializes
     one NDJSON line per message, and streams it through zstd to the current hour's
     file. It owns all file state and all rotation.
-  * A stats task prints throughput to stdout every 10 seconds.
+  * A stats task prints throughput, RSS, and free disk to stdout every 10 seconds.
   * A connection loop reconnects with capped, jittered exponential backoff and
     emits a gap marker so downstream consumers can see exactly where coverage is
     missing.
+  * Two resource guards -- free disk and RSS -- poll their limit and, on breach,
+    trip the one shared Shutdown. Every stop path (signal, disk, memory) therefore
+    converges on the same drain-and-flush, which is what keeps the final zstd
+    frame intact; an untrappable SIGKILL is the one case that cannot.
 """
 
 from __future__ import annotations
@@ -25,7 +29,9 @@ import os
 import random
 import shutil
 import signal
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,8 +49,21 @@ QUEUE_MAXSIZE = 100_000
 ZSTD_LEVEL = 3
 STATS_INTERVAL_S = 10.0
 DISK_CHECK_INTERVAL_S = 60.0
+MEMORY_CHECK_INTERVAL_S = 30.0
 PROJECTION_WINDOW_S = 60.0
 GIB = 1024**3
+MIB = 1024**2
+
+# In-process RSS ceiling. This is the *primary* memory guard: it must fire well
+# before the cgroup limits in deploy/kalshi-recorder.service, because MemoryMax
+# is a hard SIGKILL that would truncate the in-flight zstd frame. Steady-state
+# RSS is tens of MB, so this only trips on a genuine regression.
+RSS_HALT_MB = 400.0
+
+# sysexits-adjacent, distinct from run_recorder's EXIT_DISK_HALT (75) so this
+# stop is identifiable in the journal. Not in the unit's
+# RestartPreventExitStatus, so systemd restarts -- a fresh process is the cure.
+EXIT_MEMORY_HALT = 76
 
 BACKOFF_BASE_S = 0.5
 BACKOFF_CAP_S = 30.0
@@ -69,6 +88,72 @@ def _resolve_volume(path: Path) -> Path:
 def free_gb(path: Path) -> float:
     """Free space in GiB on the volume backing ``path``."""
     return shutil.disk_usage(_resolve_volume(path)).free / GIB
+
+
+def _rss_reader() -> Callable[[], int]:
+    """Pick a resident-set-size reader for this platform, once, at import time.
+
+    Linux (production) reads ``/proc/self/status``; Windows (development) calls
+    ``K32GetProcessMemoryInfo``. Returning a bound callable keeps the per-sample
+    cost to a single read with no branching.
+    """
+    status = Path("/proc/self/status")
+    if status.exists():
+
+        def _linux_rss() -> int:
+            # A live process always reports VmRSS, in kB.
+            after = status.read_text().partition("VmRSS:")[2]
+            return int(after.split(maxsplit=1)[0]) * 1024
+
+        return _linux_rss
+
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = (
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            )
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+        kernel32.K32GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+
+        def _windows_rss() -> int:
+            counters = _ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+            ok = kernel32.K32GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+            )
+            if not ok:
+                raise ctypes.WinError(ctypes.get_last_error())
+            return int(counters.WorkingSetSize)
+
+        return _windows_rss
+
+    def _unsupported_rss() -> int:
+        return 0
+
+    return _unsupported_rss
+
+
+rss_bytes = _rss_reader()
 
 
 @dataclass(slots=True)
@@ -352,6 +437,7 @@ async def stats_loop(
             f"msgs={stats.total:>10} "
             f"rate={rate:8.1f}/s "
             f"bytes={_human_bytes(stats.bytes_written):>10} "
+            f"rss={rss_bytes() / MIB:7.1f}MB "
             f"free={free_gb(cfg.data_dir):7.2f}GB "
             f"qdepth={queue.qsize():>6} "
             f"dropped={stats.dropped:>6} "
@@ -378,6 +464,34 @@ async def disk_guard_loop(cfg: Config, shutdown: Shutdown) -> None:
                 cfg.min_free_gb_halt,
             )
             shutdown.request("disk")
+            return
+
+
+async def memory_guard_loop(shutdown: Shutdown) -> None:
+    """Halt cleanly if RSS crosses RSS_HALT_MB.
+
+    Defence in depth against a memory regression. The cgroup ``MemoryMax`` in the
+    systemd unit is a hard kernel OOM kill (SIGKILL, untrappable), which would
+    truncate the in-flight zstd frame and lose the hour's tail -- exactly what the
+    clean-shutdown path exists to prevent. So we watch RSS ourselves and trip the
+    *same* Shutdown the disk guard and the signal handlers use, giving the writer
+    its normal drain-and-flush before systemd restarts us.
+    """
+    while not shutdown.event.is_set():
+        try:
+            await asyncio.wait_for(shutdown.event.wait(), timeout=MEMORY_CHECK_INTERVAL_S)
+            return
+        except TimeoutError:
+            pass
+        rss_mb = rss_bytes() / MIB
+        if rss_mb >= RSS_HALT_MB:
+            logger.error(
+                "RSS %.1f MB at or above halt threshold %.1f MB; halting cleanly "
+                "so the zstd tail frame is flushed before systemd restarts us",
+                rss_mb,
+                RSS_HALT_MB,
+            )
+            shutdown.request("memory")
             return
 
 
@@ -459,6 +573,7 @@ async def main() -> None:
         connection_loop(cfg, signer, queue, stats), name="connection"
     )
     guard_task = asyncio.create_task(disk_guard_loop(cfg, shutdown), name="disk-guard")
+    memory_task = asyncio.create_task(memory_guard_loop(shutdown), name="memory-guard")
     projection_task = asyncio.create_task(
         log_projected_runtime(cfg, stats, shutdown), name="projection"
     )
@@ -481,7 +596,7 @@ async def main() -> None:
     await writer_task
 
     # 3) Stop the background reporters/guards.
-    for task in (stats_task, guard_task, projection_task):
+    for task in (stats_task, guard_task, memory_task, projection_task):
         task.cancel()
         try:
             await task
@@ -489,16 +604,21 @@ async def main() -> None:
             pass
 
     logger.info(
-        "clean shutdown: total=%d dropped=%d reconnects=%d bytes=%d",
+        "clean shutdown: total=%d dropped=%d reconnects=%d bytes=%d rss=%.1fMB",
         stats.total,
         stats.dropped,
         stats.reconnects,
         stats.bytes_written,
+        rss_bytes() / MIB,
     )
 
-    # A disk-space halt is an abnormal stop: exit non-zero so supervisors notice.
+    # Both guards stop cleanly but abnormally: exit non-zero so supervisors notice.
+    # Disk halts must NOT restart (run_recorder maps them to 75); memory halts
+    # should, because a fresh process reclaims the memory.
     if shutdown.reason == "disk":
         raise SystemExit(1)
+    if shutdown.reason == "memory":
+        raise SystemExit(EXIT_MEMORY_HALT)
 
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown: Shutdown) -> None:

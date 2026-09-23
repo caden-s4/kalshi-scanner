@@ -33,6 +33,28 @@ RestartMaxDelaySec=300
 TimeoutStopSec=120
 KillSignal=SIGTERM
 
+# Memory containment on a 1 GB box. Three tiers, deliberately ordered:
+#
+#   1. recorder.py RSS_HALT_MB (400M, in-process)  -- PRIMARY. Trips the normal
+#      clean-shutdown path, so the queue drains and the zstd tail frame is
+#      flushed before exit(76). systemd then restarts us.
+#   2. MemoryHigh (512M)  -- cgroup v2 memory.high. A *soft* limit: the kernel
+#      throttles allocation and reclaims harder, but never kills. Buys headroom
+#      if tier 1 is somehow late.
+#   3. MemoryMax (768M)   -- cgroup v2 memory.max. A *hard* limit: on breach the
+#      kernel cgroup OOM killer sends SIGKILL, which CANNOT be trapped, so the
+#      clean-shutdown path does NOT run and the in-flight zstd frame is
+#      truncated. That is the data loss we are trying to avoid, so this is a
+#      last-resort backstop only -- it sits ABOVE tier 1 precisely so the
+#      in-process guard always fires first.
+#
+# MemorySwapMax=0 keeps a leak from thrashing swap into a slow death where the
+# recorder is alive but too stalled to keep up with the socket.
+MemoryAccounting=yes
+MemoryHigh=512M
+MemoryMax=768M
+MemorySwapMax=0
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=kalshi-recorder
